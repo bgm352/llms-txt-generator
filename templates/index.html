@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLMs.txt Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>LLMs.txt Generator</h1>
+        
+        <form id="generateForm">
+            <div class="form-group">
+                <label for="url">Website URL:</label>
+                <input type="url" id="url" name="url" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="depth">Crawl Depth (1-10):</label>
+                <input type="number" id="depth" name="depth" min="1" max="10" value="1">
+            </div>
+            
+            <button type="submit">Generate LLMs.txt</button>
+        </form>
+
+        <div id="loading" style="display: none;">
+            Processing... Please wait.
+        </div>
+
+        <div id="result" style="display: none;">
+            <h2>Preview:</h2>
+            <pre id="preview"></pre>
+            <button id="downloadBtn">Download LLMs.txt</button>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('generateForm').onsubmit = async (e) => {
+            e.preventDefault();
+            
+            const loading = document.getElementById('loading');
+            const result = document.getElementById('result');
+            const preview = document.getElementById('preview');
+            
+            loading.style.display = 'block';
+            result.style.display = 'none';
+            
+            const formData = new FormData(e.target);
+            
+            try {
+                const response = await fetch('/generate', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    preview.textContent = data.data.llmsText;
+                    result.style.display = 'block';
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            } finally {
+                loading.style.display = 'none';
+            }
+        };
+
+        document.getElementById('downloadBtn').onclick = () => {
+            const content = document.getElementById('preview').textContent;
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'llms.txt';
+            a.click();
+            window.URL.revokeObjectURL(url);
+        };
+    </script>
+</body>
+</html>

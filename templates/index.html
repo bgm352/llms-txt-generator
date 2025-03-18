@@ -4,81 +4,132 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLMs.txt Generator</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 800px;
+            margin-top: 2rem;
+        }
+        .card {
+            border: none;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        }
+        .preview-section {
+            max-height: 400px;
+            overflow-y: auto;
+            background-color: #f8f9fa;
+            padding: 1rem;
+            border-radius: 0.25rem;
+            margin-top: 1rem;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 2rem 0;
+        }
+        .error-message {
+            color: #dc3545;
+            margin-top: 0.5rem;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
-        <h1>LLMs.txt Generator</h1>
+        <h1 class="text-center mb-4">LLMs.txt Generator</h1>
         
-        <form id="generateForm">
-            <div class="form-group">
-                <label for="url">Website URL:</label>
-                <input type="url" id="url" name="url" required>
+        <div class="card">
+            <div class="card-body">
+                <form id="generateForm">
+                    <div class="mb-3">
+                        <label for="url" class="form-label">Website URL</label>
+                        <input type="url" class="form-control" id="url" name="url" required
+                               placeholder="https://example.com">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="depth" class="form-label">Crawl Depth</label>
+                        <select class="form-select" id="depth" name="depth">
+                            <option value="1">1 (Single Page)</option>
+                            <option value="2">2 (Page + Links)</option>
+                            <option value="3">3 (Deep Crawl)</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                            <option value="6">6</option>
+                            <option value="7">7</option>
+                            <option value="8">8</option>
+                            <option value="9">9</option>
+                            <option value="10">10 (Maximum)</option>
+                        </select>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary w-100">Generate LLMs.txt</button>
+                </form>
+                
+                <div class="loading">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Generating LLMs.txt file...</p>
+                </div>
+                
+                <div id="error" class="error-message"></div>
+                
+                <div id="preview" class="preview-section" style="display: none;">
+                    <h3>Preview</h3>
+                    <pre id="content"></pre>
+                    <div class="mt-3">
+                        <a id="downloadBtn" href="#" class="btn btn-success">Download LLMs.txt</a>
+                    </div>
+                </div>
             </div>
-            
-            <div class="form-group">
-                <label for="depth">Crawl Depth (1-10):</label>
-                <input type="number" id="depth" name="depth" min="1" max="10" value="1">
-            </div>
-            
-            <button type="submit">Generate LLMs.txt</button>
-        </form>
-
-        <div id="loading" style="display: none;">
-            Processing... Please wait.
-        </div>
-
-        <div id="result" style="display: none;">
-            <h2>Preview:</h2>
-            <pre id="preview"></pre>
-            <button id="downloadBtn">Download LLMs.txt</button>
         </div>
     </div>
 
     <script>
-        document.getElementById('generateForm').onsubmit = async (e) => {
+        document.getElementById('generateForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             
-            const loading = document.getElementById('loading');
-            const result = document.getElementById('result');
+            const url = document.getElementById('url').value;
+            const depth = document.getElementById('depth').value;
+            const loading = document.querySelector('.loading');
+            const error = document.getElementById('error');
             const preview = document.getElementById('preview');
+            const content = document.getElementById('content');
+            const downloadBtn = document.getElementById('downloadBtn');
             
+            // Reset UI
+            error.textContent = '';
+            preview.style.display = 'none';
             loading.style.display = 'block';
-            result.style.display = 'none';
-            
-            const formData = new FormData(e.target);
             
             try {
                 const response = await fetch('/generate', {
                     method: 'POST',
-                    body: formData
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url, depth }),
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
-                    preview.textContent = data.data.llmsText;
-                    result.style.display = 'block';
+                    content.textContent = data.content;
+                    downloadBtn.href = `/download/${data.filename}`;
+                    preview.style.display = 'block';
+                    error.textContent = '';
                 } else {
-                    alert('Error: ' + data.error);
+                    error.textContent = data.error || 'An error occurred';
                 }
-            } catch (error) {
-                alert('Error: ' + error.message);
+            } catch (err) {
+                error.textContent = 'Failed to generate LLMs.txt file';
             } finally {
                 loading.style.display = 'none';
             }
-        };
-
-        document.getElementById('downloadBtn').onclick = () => {
-            const content = document.getElementById('preview').textContent;
-            const blob = new Blob([content], { type: 'text/plain' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'llms.txt';
-            a.click();
-            window.URL.revokeObjectURL(url);
-        };
+        });
     </script>
 </body>
 </html>

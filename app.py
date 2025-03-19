@@ -46,17 +46,23 @@ class WebCrawler:
                 
                 # Find more links to crawl if we haven't reached our depth or page limit
                 if current_depth < depth and len(self.visited_urls) < max_pages:
-                    soup = BeautifulSoup(requests.get(current_url).text, 'html.parser')
-                    domain = urlparse(current_url).netloc
-                    
-                    # Find all links
-                    for link in soup.find_all('a', href=True):
-                        href = link['href']
-                        absolute_url = urljoin(current_url, href)
+                    try:
+                        response = requests.get(current_url, headers={
+                            'User-Agent': random.choice(self.user_agents)
+                        }, timeout=10)
+                        soup = BeautifulSoup(response.text, 'html.parser')
+                        domain = urlparse(current_url).netloc
                         
-                        # Only follow links on the same domain
-                        if urlparse(absolute_url).netloc == domain and absolute_url not in self.visited_urls:
-                            _crawl_recursive(absolute_url, current_depth + 1)
+                        # Find all links
+                        for link in soup.find_all('a', href=True):
+                            href = link['href']
+                            absolute_url = urljoin(current_url, href)
+                            
+                            # Only follow links on the same domain
+                            if urlparse(absolute_url).netloc == domain and absolute_url not in self.visited_urls:
+                                _crawl_recursive(absolute_url, current_depth + 1)
+                    except Exception as e:
+                        logger.error(f"Error finding links on {current_url}: {str(e)}")
                             
         _crawl_recursive(url, 1)
         return results
@@ -99,6 +105,39 @@ def extract_sections_and_links(soup):
     # Find all headings (h1-h6)
     headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
     
+    # If no headings, just process the whole document
+    if not headings:
+        # Find all links in the document
+        for link in soup.find_all('a', href=True):
+            link_text = link.get_text().strip() or "Link"
+            link_url = link.get('href')
+            
+            # Don't include empty or javascript links
+            if not link_url or link_url.startswith('javascript:'):
+                continue
+                
+            # Get optional details from title attribute or surrounding text
+            link_details = link.get('title', '')
+            
+            # If no title attribute, try to get details from parent paragraph
+            if not link_details and link.parent.name == 'p':
+                paragraph_text = link.parent.get_text().strip()
+                link_text_pos = paragraph_text.find(link_text)
+                if link_text_pos >= 0:
+                    context_text = paragraph_text[link_text_pos + len(link_text):].strip()
+                    if context_text:
+                        link_details = context_text[:100] + ('...' if len(context_text) > 100 else '')
+            
+            current_section["links"].append({
+                "title": link_text,
+                "url": link_url,
+                "details": link_details
+            })
+        
+        if current_section["links"]:
+            sections.append(current_section)
+        return sections
+    
     # Process each heading as a potential section
     for heading in headings:
         # Save previous section if it exists
@@ -115,8 +154,13 @@ def extract_sections_and_links(soup):
         next_element = heading.find_next()
         while next_element and next_element.name not in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
             if next_element.name == 'a' and next_element.get('href'):
-                link_text = next_element.get_text().strip()
+                link_text = next_element.get_text().strip() or "Link"
                 link_url = next_element.get('href')
+                
+                # Don't include empty or javascript links
+                if not link_url or link_url.startswith('javascript:'):
+                    next_element = next_element.find_next()
+                    continue
                 
                 # Get optional details from title attribute or surrounding text
                 link_details = next_element.get('title', '')
@@ -142,6 +186,29 @@ def extract_sections_and_links(soup):
     if current_section["links"]:
         sections.append(current_section)
     
+    # If no sections with links were found, try to find all links in the document
+    if not any(section["links"] for section in sections):
+        general_section = {"title": "General Links", "links": []}
+        for link in soup.find_all('a', href=True):
+            link_text = link.get_text().strip() or "Link"
+            link_url = link.get('href')
+            
+            # Don't include empty or javascript links
+            if not link_url or link_url.startswith('javascript:'):
+                continue
+                
+            # Get optional details from title attribute
+            link_details = link.get('title', '')
+            
+            general_section["links"].append({
+                "title": link_text,
+                "url": link_url,
+                "details": link_details
+            })
+        
+        if general_section["links"]:
+            sections.append(general_section)
+    
     return sections
 
 def format_llmstxt(metadata, sections):
@@ -159,7 +226,12 @@ def format_llmstxt(metadata, sections):
         content += f"## {section['title']}\n"
         
         for link in section['links']:
-            content += f"- [{link['title']}]({link['url']})"
+            # Make sure URL is absolute
+            link_url = link['url']
+            if not link_url.startswith(('http://', 'https://')):
+                link_url = urljoin(metadata['url'], link_url)
+                
+            content += f"- [{link['title']}]({link_url})"
             if link.get('details'):
                 content += f": {link['details']}"
             content += "\n"
@@ -216,7 +288,7 @@ def crawl_website(url, format="markdown", respect_robots=True):
         
         # Extract metadata
         metadata = {
-            'title': soup.title.string if soup.title else 'Unknown Title',
+            'title': soup.title.string.strip() if soup.title else 'Unknown Title',
             'url': url,
             'date_crawled': datetime.now().isoformat(),
             'source_type': 'web',
@@ -239,7 +311,6 @@ def crawl_website(url, format="markdown", respect_robots=True):
             'content': llms_content,
             'metadata': metadata,
             'sections': sections,
-            'raw_html': response.text  # Store for debugging or further processing
         }
     except requests.exceptions.RequestException as e:
         return {
@@ -254,11 +325,10 @@ def crawl_website(url, format="markdown", respect_robots=True):
         }
 
 # Function to create a download link for text content
-def get_download_link(text, filename):
+def get_text_download_link(text, filename):
     """Generates a link to download the given text."""
     b64 = base64.b64encode(text.encode()).decode()
-    href = f'data:file/txt;base64,{b64}'
-    return f'<a href="{href}" download="{filename}">Download {filename}</a>'
+    return f'<a href="data:text/plain;base64,{b64}" download="{filename}">Download {filename}</a>'
 
 # Main app
 def main():
@@ -310,7 +380,6 @@ def main():
         advanced_options = st.expander("Advanced Options")
         with advanced_options:
             bypass_403 = st.checkbox("Try to bypass 403 errors", value=False)
-            save_file = st.checkbox("Save to file", value=True)
             combine_results = st.checkbox("Combine all pages into single file", value=True)
         
         submitted = st.form_submit_button("Generate")
@@ -339,7 +408,7 @@ def main():
                 st.success(f"Successfully crawled {len(results)} pages")
                 
                 # Combine results if requested
-                if combine_results:
+                if combine_results and len(results) > 1:
                     combined_content = f"# Website: {urlparse(url).netloc}\n\n"
                     for i, result in enumerate(results, 1):
                         combined_content += f"# Page {i}: {result['metadata']['title']}\n"
@@ -357,17 +426,12 @@ def main():
                     st.markdown("### Combined Results")
                     st.text_area("Combined LLMStxt Content:", combined_content, height=400)
                     
-                    # Download combined content
-                    if save_file:
-                        domain = urlparse(url).netloc
-                        filename = f"{domain}_combined_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
-                        
-                        st.download_button(
-                            label="Download Combined Results",
-                            data=combined_content,
-                            file_name=filename,
-                            mime="text/markdown"
-                        )
+                    # Provide download link using HTML
+                    domain = urlparse(url).netloc
+                    filename = f"{domain}_combined_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+                    
+                    # Use a workaround for the download button
+                    st.markdown(get_text_download_link(combined_content, filename), unsafe_allow_html=True)
                 
                 # Display individual results
                 st.markdown("### Individual Pages")
@@ -376,19 +440,15 @@ def main():
                         st.markdown(f"URL: {result['metadata']['url']}")
                         st.text_area(f"Content for {result['metadata']['title']}", result['content'], height=300)
                         
-                        # Download individual result
-                        if save_file:
-                            page_filename = re.sub(r'[^\w]', '_', result['metadata']['url'])
-                            page_filename = re.sub(r'_+', '_', page_filename)
-                            page_filename = f"{page_filename[:50]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
-                            
-                            st.download_button(
-                                label=f"Download {result['metadata']['title']}",
-                                data=result['content'],
-                                file_name=page_filename,
-                                mime="text/markdown",
-                                key=f"download_{i}"
-                            )
+                        # Provide download link using HTML
+                        page_filename = re.sub(r'[^\w]', '_', result['metadata']['url'])
+                        page_filename = re.sub(r'_+', '_', page_filename)
+                        page_filename = f"{page_filename[:50]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+                        
+                        st.markdown(
+                            get_text_download_link(result['content'], page_filename),
+                            unsafe_allow_html=True
+                        )
             else:
                 st.error("Failed to crawl any pages. Check the URL and try again.")
                 if results and 'error' in results[0]:

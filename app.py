@@ -56,6 +56,41 @@ def check_robots_txt(url):
         # If we can't check robots.txt, proceed anyway
         return True, None
 
+def simplify_text(text):
+    """
+    Simplify text to make it more concise and LLM-friendly
+    """
+    # Remove excessive whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    
+    # Remove redundant phrases
+    text = re.sub(r'click here', 'access this resource', text, flags=re.IGNORECASE)
+    text = re.sub(r'as you can see', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'it goes without saying', '', text, flags=re.IGNORECASE)
+    
+    # Fix common URL presentation issues
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', lambda m: f"[{m.group(1)}]({m.group(2)}) (Link to: {m.group(1)})", text)
+    
+    return text.strip()
+
+def extract_glossary(text):
+    """
+    Extract potential jargon or technical terms from the text
+    """
+    # Simple pattern to identify potential technical terms
+    # This is a basic implementation - a more sophisticated approach would use NLP
+    words = re.findall(r'\b[A-Z][a-z]*[A-Z][a-z]*\w*\b|\b[A-Z]{2,}\b', text)
+    
+    # Deduplicate
+    unique_terms = list(set(words))
+    
+    # Filter out common words
+    common_words = ["I", "You", "He", "She", "It", "We", "They", "This", "That", "These", "Those", "HTML", "CSS", "PDF"]
+    filtered_terms = [term for term in unique_terms if term not in common_words]
+    
+    return filtered_terms[:10]  # Limit to top 10 terms
+
 def crawl_website(url, depth=1, format="markdown", respect_robots=True):
     """
     Crawl a website and extract content according to LLMStxt standards.
@@ -122,8 +157,14 @@ def crawl_website(url, depth=1, format="markdown", respect_robots=True):
             'title': soup.title.string if soup.title else 'Unknown Title',
             'url': url,
             'date_crawled': datetime.now().isoformat(),
-            'source_type': 'web'
+            'source_type': 'web',
+            'description': ''
         }
+        
+        # Try to get meta description
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc:
+            metadata['description'] = meta_desc.get('content', '')
         
         # Try to find main content area
         main_content = None
@@ -152,32 +193,46 @@ def crawl_website(url, depth=1, format="markdown", respect_robots=True):
             for element in main_content.select('script, style, nav, footer, header, .sidebar, .ads, .comments, iframe, noscript, [role="complementary"]'):
                 element.decompose()
         
+        # Improve links by adding descriptions
+        for link in main_content.find_all('a'):
+            href = link.get('href', '')
+            text = link.get_text().strip()
+            if href and text and not text.lower().startswith(('http', 'www')):
+                # Add a brief description if the link text is not already a URL
+                if not link.has_attr('title'):
+                    link['title'] = f"Link to: {text}"
+        
         # Convert to desired format
         if format == "markdown":
             h2t = html2text.HTML2Text()
             h2t.ignore_links = False
             h2t.ignore_images = False
             h2t.ignore_tables = False
+            h2t.body_width = 0  # No line wrapping
             content = h2t.handle(str(main_content))
         else:
             # Extract text content
             content = main_content.get_text(separator='\n\n')
-            # Clean up whitespace
-            content = re.sub(r'\n{3,}', '\n\n', content)
-            content = re.sub(r'[ \t]+', ' ', content)
-            content = content.strip()
+        
+        # Apply simplification to improve LLM readability
+        content = simplify_text(content)
+        
+        # Extract potential glossary terms
+        glossary_terms = extract_glossary(content)
         
         # Structure according to LLMStxt format
         llms_content = {
             "metadata": metadata,
-            "content": content
+            "content": content,
+            "potential_jargon": glossary_terms
         }
         
         return {
             'success': True,
             'content': content,
             'metadata': metadata,
-            'llms_content': llms_content
+            'llms_content': llms_content,
+            'potential_jargon': glossary_terms
         }
     except requests.exceptions.RequestException as e:
         return {
@@ -207,6 +262,21 @@ def main():
     st.title("LLMStxt Generator")
     st.markdown("Extract content from websites in a format optimized for LLMs")
     
+    # Add LLMStxt guidelines
+    with st.expander("LLMStxt Guidelines"):
+        st.markdown("""
+        ## Guidelines for effective LLMStxt files
+        
+        For the best results when creating content for language models, follow these guidelines:
+        
+        1. **Use concise, clear language** - Avoid wordiness and get to the point
+        2. **When linking to resources, include brief, informative descriptions** - Never use "click here" as link text
+        3. **Avoid ambiguous terms or unexplained jargon** - Define technical terms or provide context
+        4. **Test your content with multiple language models** - Ensure it can be understood correctly
+        
+        This tool will help you extract and format content following these guidelines.
+        """)
+    
     # Creating crawler instance
     crawler = WebCrawler()
     
@@ -225,6 +295,8 @@ def main():
         with advanced_options:
             bypass_403 = st.checkbox("Try to bypass 403 errors (may not work for all sites)", value=False)
             save_file = st.checkbox("Save to file", value=True)
+            improve_links = st.checkbox("Improve link descriptions", value=True)
+            detect_jargon = st.checkbox("Detect potential jargon", value=True)
         
         submitted = st.form_submit_button("Generate")
         
@@ -254,13 +326,20 @@ def main():
 - URL: {result['metadata']['url']}
 - Date Crawled: {result['metadata']['date_crawled']}
 - Source Type: {result['metadata']['source_type']}
+- Description: {result['metadata'].get('description', 'No description available')}
 
 ## Content
 {result['content']}
 """
+
+                # Add potential jargon glossary if detected
+                if detect_jargon and result.get('potential_jargon'):
+                    llms_content += "\n\n## Potential Technical Terms\n"
+                    for term in result['potential_jargon']:
+                        llms_content += f"- {term}\n"
                 
                 # Display tabs for different views
-                tab1, tab2, tab3 = st.tabs(["LLMStxt", "Raw Content", "JSON"])
+                tab1, tab2, tab3, tab4 = st.tabs(["LLMStxt", "Raw Content", "JSON", "LLM Testing"])
                 
                 with tab1:
                     st.markdown(llms_content)
@@ -274,7 +353,35 @@ def main():
                         "metadata": result['metadata'],
                         "content": result['content']
                     }
+                    
+                    # Add potential jargon to JSON
+                    if detect_jargon and result.get('potential_jargon'):
+                        json_format["potential_jargon"] = result['potential_jargon']
+                    
                     st.json(json_format)
+                
+                with tab4:
+                    st.markdown("""
+                    ### LLM Testing Guide
+                    
+                    To test if your LLMStxt content is effective:
+                    
+                    1. Copy the generated LLMStxt content
+                    2. Paste it into an LLM interface like ChatGPT, Claude, or Llama
+                    3. Ask the following test questions:
+                    
+                    ```
+                    What is the main topic of this content?
+                    Summarize this content in 3 sentences.
+                    What are the key points from this content?
+                    ```
+                    
+                    Check if the LLM's responses accurately reflect the content. If not, you may need to:
+                    - Make the content more concise
+                    - Define technical terms
+                    - Improve the structure
+                    - Add more context
+                    """)
                 
                 # Save to file if requested
                 if save_file:
@@ -283,21 +390,45 @@ def main():
                     filename = re.sub(r'_+', '_', filename)
                     filename = f"{filename[:50]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
                     
-                    # Provide download button
-                    st.download_button(
-                        label="Download as Markdown",
-                        data=llms_content,
-                        file_name=filename,
-                        mime="text/markdown",
-                    )
+                    # For the Markdown download button
+                    try:
+                        st.download_button(
+                            label="Download as Markdown",
+                            data=llms_content,
+                            file_name=filename,
+                            mime="text/markdown"
+                        )
+                    except Exception as e:
+                        st.error(f"Error with Markdown download: {str(e)}")
+                        st.markdown(get_download_link(llms_content, filename), unsafe_allow_html=True)
                     
-                    # Also provide JSON download
-                    st.download_button(
-                        label="Download as JSON",
-                        data=json.dumps(json_format, indent=2),
-                        file_name=f"{filename.replace('.md', '.json')}",
-                        mime="application/json",
-                    )
+                    # For the JSON download button
+                    try:
+                        # Convert to proper JSON string
+                        json_str = json.dumps(json_format, indent=2)
+                        st.download_button(
+                            label="Download as JSON",
+                            data=json_str,
+                            file_name=filename.replace('.md', '.json'),
+                            mime="application/json"
+                        )
+                    except Exception as e:
+                        st.error(f"Error with JSON download: {str(e)}")
+                        st.markdown(get_download_link(json_str, filename.replace('.md', '.json')), unsafe_allow_html=True)
+                    
+                    # Also create a plain text version of the content
+                    plain_content = re.sub(r'#+ ', '', llms_content)  # Remove markdown headers
+                    plain_content = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1 (\2)', plain_content)  # Convert links to plain text
+                    try:
+                        st.download_button(
+                            label="Download as Plain Text",
+                            data=plain_content,
+                            file_name=filename.replace('.md', '.txt'),
+                            mime="text/plain"
+                        )
+                    except Exception as e:
+                        st.error(f"Error with Plain Text download: {str(e)}")
+                        st.markdown(get_download_link(plain_content, filename.replace('.md', '.txt')), unsafe_allow_html=True)
             else:
                 st.error(f"Error: {result['error']}")
                 st.warning("If you're getting a 403 Forbidden error, try enabling 'Try to bypass 403 errors' in Advanced Options.")
@@ -341,7 +472,9 @@ def main():
         {
             "url": "https://example.com",
             "depth": 1,
-            "format": "markdown"
+            "format": "markdown",
+            "improve_links": true,
+            "detect_jargon": true
         }
         ```
         
@@ -355,9 +488,11 @@ def main():
                 "title": "Example Domain",
                 "url": "https://example.com",
                 "date_crawled": "2025-03-19T12:34:56.789",
-                "source_type": "web"
+                "source_type": "web",
+                "description": "This domain is for illustrative examples"
             },
-            "content": "## Example Domain\\n\\nThis domain is for use in illustrative examples in documents..."
+            "content": "## Example Domain\\n\\nThis domain is for use in illustrative examples in documents...",
+            "potential_jargon": ["ExampleTerm", "TechnicalWord"]
         }
         ```
         

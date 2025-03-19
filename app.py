@@ -1,5 +1,4 @@
 from flask import Flask, render_template, request, jsonify, send_file
-from utils.crawler import WebCrawler
 import os
 import logging
 from datetime import datetime
@@ -15,6 +14,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Implement WebCrawler class since it was imported but not defined
+class WebCrawler:
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'LLMStxt-Crawler/1.0 (https://example.com/bot; bot@example.com)'
+        }
+    
+    def crawl(self, url, depth=1, format="markdown"):
+        return crawl_website(url, depth, format)
+
 crawler = WebCrawler()
 
 def crawl_website(url, depth=1, format="markdown"):
@@ -75,11 +85,12 @@ def crawl_website(url, depth=1, format="markdown"):
         
         # If no main content found, use body
         if not main_content:
-            main_content = soup.body
+            main_content = soup.body or soup
         
         # Remove unwanted elements
-        for element in main_content.select('script, style, nav, footer, header, .sidebar, .ads, .comments, iframe, noscript, [role="complementary"]'):
-            element.decompose()
+        if main_content:
+            for element in main_content.select('script, style, nav, footer, header, .sidebar, .ads, .comments, iframe, noscript, [role="complementary"]'):
+                element.decompose()
         
         # Convert to desired format
         if format == "markdown":
@@ -114,6 +125,7 @@ def crawl_website(url, depth=1, format="markdown"):
             'error': f"Request error: {str(e)}"
         }
     except Exception as e:
+        logger.error(f"Error crawling website: {str(e)}")
         return {
             'success': False,
             'error': str(e)
@@ -212,8 +224,18 @@ def api_crawl():
 @app.route('/download/<filename>')
 def download(filename):
     try:
+        # Make sure the output directory exists
+        output_dir = os.path.join(os.getcwd(), 'output')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        file_path = os.path.join(output_dir, filename)
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {filename}")
+            
         return send_file(
-            os.path.join('output', filename),
+            file_path,
             as_attachment=True,
             download_name=filename
         )
@@ -239,4 +261,8 @@ def internal_error(error):
     }), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    # Create necessary directories
+    os.makedirs(os.path.join(os.getcwd(), 'output'), exist_ok=True)
+    os.makedirs(os.path.join(os.getcwd(), 'crawled_content'), exist_ok=True)
+    
+    app.run(debug=False, host='127.0.0.1', port=5000)  # Set debug to False in production

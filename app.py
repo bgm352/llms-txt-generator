@@ -1,21 +1,18 @@
-from flask import Flask, render_template, request, jsonify, send_file
+import streamlit as st
 import os
 import logging
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-import markdown
 import re
 import html2text
 import json
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-
-# Implement WebCrawler class since it was imported but not defined
 class WebCrawler:
     def __init__(self):
         self.headers = {
@@ -24,8 +21,6 @@ class WebCrawler:
     
     def crawl(self, url, depth=1, format="markdown"):
         return crawl_website(url, depth, format)
-
-crawler = WebCrawler()
 
 def crawl_website(url, depth=1, format="markdown"):
     """
@@ -131,24 +126,49 @@ def crawl_website(url, depth=1, format="markdown"):
             'error': str(e)
         }
 
-@app.route('/')
-def home():
-    return render_template('index.html')
 
-@app.route('/generate', methods=['POST'])
-def generate():
-    url = request.form.get('url')
-    depth = int(request.form.get('depth', 1))
-    format = request.form.get('format', 'markdown')
+# Function to create a download link for text content
+def get_download_link(text, filename):
+    """Generates a link to download the given text."""
+    b64 = base64.b64encode(text.encode()).decode()
+    href = f'data:file/txt;base64,{b64}'
+    return f'<a href="{href}" download="{filename}">Download {filename}</a>'
+
+
+# Main app
+def main():
+    st.set_page_config(page_title="LLMStxt Generator", page_icon="📄", layout="wide")
     
-    if not url:
-        return jsonify({'success': False, 'error': 'URL is required'})
+    st.title("LLMStxt Generator")
+    st.markdown("Extract content from websites in a format optimized for LLMs")
     
-    result = crawl_website(url, depth, format)
+    # Creating crawler instance
+    crawler = WebCrawler()
     
-    if result['success']:
-        # Format according to LLMStxt specifications
-        llms_content = f"""# {result['metadata']['title']}
+    # Form for URL input
+    with st.form("url_form"):
+        url = st.text_input("Enter website URL:")
+        col1, col2 = st.columns(2)
+        with col1:
+            depth = st.number_input("Crawl depth:", min_value=1, max_value=3, value=1)
+        with col2:
+            format_option = st.selectbox("Output format:", ["markdown", "plaintext"])
+        
+        save_file = st.checkbox("Save to file", value=True)
+        
+        submitted = st.form_submit_button("Generate")
+        
+        if submitted:
+            if not url:
+                st.error("URL is required!")
+                return
+            
+            with st.spinner("Crawling website..."):
+                result = crawl_website(url, depth, format_option)
+            
+            if result['success']:
+                # Format according to LLMStxt specifications
+                llms_content = f"""# {result['metadata']['title']}
 
 ## Metadata
 - URL: {result['metadata']['url']}
@@ -158,111 +178,91 @@ def generate():
 ## Content
 {result['content']}
 """
+                
+                # Display tabs for different views
+                tab1, tab2, tab3 = st.tabs(["LLMStxt", "Raw Content", "JSON"])
+                
+                with tab1:
+                    st.markdown(llms_content)
+                
+                with tab2:
+                    st.text_area("Raw extracted content:", result['content'], height=400)
+                
+                with tab3:
+                    json_format = {
+                        "version": "1.0",
+                        "metadata": result['metadata'],
+                        "content": result['content']
+                    }
+                    st.json(json_format)
+                
+                # Save to file if requested
+                if save_file:
+                    # Create safe filename from URL
+                    filename = re.sub(r'[^\w]', '_', url)
+                    filename = re.sub(r'_+', '_', filename)
+                    filename = f"{filename[:50]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+                    
+                    # Provide download button
+                    st.download_button(
+                        label="Download as Markdown",
+                        data=llms_content,
+                        file_name=filename,
+                        mime="text/markdown",
+                    )
+                    
+                    # Also provide JSON download
+                    st.download_button(
+                        label="Download as JSON",
+                        data=json.dumps(json_format, indent=2),
+                        file_name=f"{filename.replace('.md', '.json')}",
+                        mime="application/json",
+                    )
+            else:
+                st.error(f"Error: {result['error']}")
+
+    # API Documentation
+    with st.expander("API Documentation"):
+        st.markdown("""
+        ## API Usage
         
-        # Save to file if requested
-        if request.form.get('save', False):
-            save_dir = os.path.join(os.getcwd(), 'crawled_content')
-            os.makedirs(save_dir, exist_ok=True)
-            
-            # Create safe filename from URL
-            filename = re.sub(r'[^\w]', '_', url)
-            filename = re.sub(r'_+', '_', filename)
-            filename = f"{filename[:50]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
-            
-            file_path = os.path.join(save_dir, filename)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(llms_content)
+        You can also access this functionality via API:
         
-        # Provide JSON format for API consumers
-        json_format = {
-            "version": "1.0",
-            "metadata": result['metadata'],
-            "content": result['content']
+        ### Endpoint
+        
+        ```
+        POST /api/crawl
+        ```
+        
+        ### Request Body
+        
+        ```json
+        {
+            "url": "https://example.com",
+            "depth": 1,
+            "format": "markdown"
         }
+        ```
         
-        return jsonify({
-            'success': True,
-            'data': {
-                'llmsText': llms_content,
-                'json': json_format,
-                'metadata': result['metadata']
-            }
-        })
-    else:
-        return jsonify({
-            'success': False,
-            'error': result['error']
-        })
-
-@app.route('/api/crawl', methods=['POST'])
-def api_crawl():
-    """API endpoint that accepts JSON input"""
-    data = request.json
-    
-    if not data or 'url' not in data:
-        return jsonify({'success': False, 'error': 'URL is required in JSON body'})
-    
-    url = data['url']
-    depth = data.get('depth', 1)
-    format = data.get('format', 'markdown')
-    
-    result = crawl_website(url, depth, format)
-    
-    if result['success']:
-        return jsonify({
-            'success': True,
-            'version': '1.0',
-            'metadata': result['metadata'],
-            'content': result['content']
-        })
-    else:
-        return jsonify({
-            'success': False,
-            'error': result['error']
-        })
-
-@app.route('/download/<filename>')
-def download(filename):
-    try:
-        # Make sure the output directory exists
-        output_dir = os.path.join(os.getcwd(), 'output')
-        os.makedirs(output_dir, exist_ok=True)
+        ### Response
         
-        file_path = os.path.join(output_dir, filename)
+        ```json
+        {
+            "success": true,
+            "version": "1.0",
+            "metadata": {
+                "title": "Example Domain",
+                "url": "https://example.com",
+                "date_crawled": "2025-03-19T12:34:56.789",
+                "source_type": "web"
+            },
+            "content": "## Example Domain\\n\\nThis domain is for use in illustrative examples in documents..."
+        }
+        ```
         
-        # Check if file exists
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {filename}")
-            
-        return send_file(
-            file_path,
-            as_attachment=True,
-            download_name=filename
-        )
-    except Exception as e:
-        logger.error(f"Error downloading file: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': 'File not found'
-        }), 404
+        > Note: When using Streamlit, this API functionality is not directly accessible. This documentation is for reference if you deploy the Flask version separately.
+        """)
 
-@app.errorhandler(404)
-def not_found_error(error):
-    return jsonify({
-        'success': False,
-        'error': 'Not found'
-    }), 404
 
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        'success': False,
-        'error': 'Internal server error'
-    }), 500
-
-if __name__ == '__main__':
-    # Create necessary directories
-    os.makedirs(os.path.join(os.getcwd(), 'output'), exist_ok=True)
-    os.makedirs(os.path.join(os.getcwd(), 'crawled_content'), exist_ok=True)
-    
-    app.run(debug=False, host='127.0.0.1', port=5000)  # Set debug to False in production
+if __name__ == "__main__":
+    main()

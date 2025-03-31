@@ -10,6 +10,8 @@ import json
 import base64
 import time
 import random
+import csv
+import io
 from urllib.parse import urljoin, urlparse
 
 # Configure logging
@@ -211,7 +213,7 @@ def extract_sections_and_links(soup):
     
     return sections
 
-def format_llmstxt(metadata, sections):
+def format_llmstxt(metadata, sections, condensed=False):
     """
     Format content according to requested LLMStxt format
     """
@@ -225,17 +227,35 @@ def format_llmstxt(metadata, sections):
     for section in sections:
         content += f"## {section['title']}\n"
         
-        for link in section['links']:
+        # If condensed, limit the number of links per section
+        links_to_process = section['links']
+        if condensed and len(links_to_process) > 5:
+            links_to_process = links_to_process[:5]
+            
+        for link in links_to_process:
             # Make sure URL is absolute
             link_url = link['url']
             if not link_url.startswith(('http://', 'https://')):
                 link_url = urljoin(metadata['url'], link_url)
                 
             content += f"- [{link['title']}]({link_url})"
+            
+            # If condensed, truncate details or omit them
             if link.get('details'):
-                content += f": {link['details']}"
+                if condensed:
+                    details = link['details'][:50]
+                    if len(link['details']) > 50:
+                        details += "..."
+                    content += f": {details}"
+                else:
+                    content += f": {link['details']}"
+                    
             content += "\n"
         
+        # If condensed and we truncated links, add an ellipsis
+        if condensed and len(section['links']) > 5:
+            content += f"- ... ({len(section['links']) - 5} more links)\n"
+            
         content += "\n"
     
     return content
@@ -330,6 +350,38 @@ def get_text_download_link(text, filename):
     b64 = base64.b64encode(text.encode()).decode()
     return f'<a href="data:text/plain;base64,{b64}" download="{filename}">Download {filename}</a>'
 
+# Function to create a download link for CSV content
+def get_csv_download_link(results, filename):
+    """Generates a link to download the given results as CSV."""
+    csv_data = io.StringIO()
+    writer = csv.writer(csv_data)
+    
+    # Write header
+    writer.writerow(['Page Title', 'URL', 'Section Title', 'Link Title', 'Link URL', 'Link Details'])
+    
+    # Write data
+    for result in results:
+        if not result['success']:
+            continue
+            
+        page_title = result['metadata']['title']
+        page_url = result['metadata']['url']
+        
+        for section in result['sections']:
+            section_title = section['title']
+            for link in section['links']:
+                link_title = link['title']
+                link_url = link['url']
+                if not link_url.startswith(('http://', 'https://')):
+                    link_url = urljoin(page_url, link_url)
+                link_details = link.get('details', '')
+                
+                writer.writerow([page_title, page_url, section_title, link_title, link_url, link_details])
+    
+    csv_string = csv_data.getvalue()
+    b64 = base64.b64encode(csv_string.encode()).decode()
+    return f'<a href="data:text/csv;base64,{b64}" download="{filename}">Download {filename}</a>'
+
 # Main app
 def main():
     st.set_page_config(page_title="Custom LLMStxt Generator", page_icon="📄", layout="wide")
@@ -381,6 +433,10 @@ def main():
         with advanced_options:
             bypass_403 = st.checkbox("Try to bypass 403 errors", value=False)
             combine_results = st.checkbox("Combine all pages into single file", value=True)
+            condensed_output = st.checkbox("Use condensed output format (shorter content)", value=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                output_format = st.radio("Output format:", ["Markdown (.md)", "CSV (.csv)"])
         
         submitted = st.form_submit_button("Generate")
         
@@ -407,48 +463,104 @@ def main():
                 # Display results
                 st.success(f"Successfully crawled {len(results)} pages")
                 
-                # Combine results if requested
-                if combine_results and len(results) > 1:
-                    combined_content = f"# Website: {urlparse(url).netloc}\n\n"
-                    for i, result in enumerate(results, 1):
-                        combined_content += f"# Page {i}: {result['metadata']['title']}\n"
-                        # Add URL as subtitle
-                        combined_content += f"> URL: {result['metadata']['url']}\n\n"
-                        # Add the content without the title (which we just added)
-                        page_content = result['content']
-                        # Remove the first line (title) as we've already added it
-                        page_content_lines = page_content.split('\n')
-                        if page_content_lines and page_content_lines[0].startswith('# '):
-                            page_content = '\n'.join(page_content_lines[1:])
-                        combined_content += page_content + "\n\n---\n\n"
-                    
-                    # Display combined content
-                    st.markdown("### Combined Results")
-                    st.text_area("Combined LLMStxt Content:", combined_content, height=400)
-                    
-                    # Provide download link using HTML
-                    domain = urlparse(url).netloc
-                    filename = f"{domain}_combined_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
-                    
-                    # Use a workaround for the download button
-                    st.markdown(get_text_download_link(combined_content, filename), unsafe_allow_html=True)
+                domain = urlparse(url).netloc
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
                 
-                # Display individual results
-                st.markdown("### Individual Pages")
-                for i, result in enumerate(results, 1):
-                    with st.expander(f"Page {i}: {result['metadata']['title']}"):
-                        st.markdown(f"URL: {result['metadata']['url']}")
-                        st.text_area(f"Content for {result['metadata']['title']}", result['content'], height=300)
+                # Handle CSV output format
+                if output_format == "CSV (.csv)":
+                    filename = f"{domain}_{timestamp}.csv"
+                    st.markdown("### CSV Export")
+                    
+                    # Provide download link for CSV
+                    st.markdown(get_csv_download_link(results, filename), unsafe_allow_html=True)
+                    
+                    # Show preview of CSV data
+                    with st.expander("CSV Preview"):
+                        preview_data = []
+                        header = ['Page Title', 'Section Title', 'Link Title', 'Link URL']
+                        preview_data.append(header)
+                        
+                        for result in results[:3]:  # Only show first 3 pages in preview
+                            if not result['success']:
+                                continue
+                                
+                            page_title = result['metadata']['title']
+                            
+                            for section in result['sections'][:2]:  # Only show first 2 sections per page
+                                section_title = section['title']
+                                for link in section['links'][:3]:  # Only show first 3 links per section
+                                    link_title = link['title']
+                                    link_url = link['url']
+                                    preview_data.append([page_title, section_title, link_title, link_url])
+                        
+                        st.table(preview_data)
+                
+                # Handle Markdown output format
+                else:
+                    # Combine results if requested
+                    if combine_results and len(results) > 1:
+                        combined_content = f"# Website: {urlparse(url).netloc}\n\n"
+                        for i, result in enumerate(results, 1):
+                            combined_content += f"# Page {i}: {result['metadata']['title']}\n"
+                            # Add URL as subtitle
+                            combined_content += f"> URL: {result['metadata']['url']}\n\n"
+                            
+                            # Generate condensed content for this page if requested
+                            if condensed_output:
+                                # Generate condensed content for this page
+                                condensed_content = format_llmstxt(result['metadata'], result['sections'], condensed=True)
+                                # Remove the first line (title) as we've already added it
+                                condensed_content_lines = condensed_content.split('\n')
+                                if condensed_content_lines and condensed_content_lines[0].startswith('# '):
+                                    condensed_content = '\n'.join(condensed_content_lines[1:])
+                                combined_content += condensed_content + "\n\n---\n\n"
+                            else:
+                                # Add the content without the title (which we just added)
+                                page_content = result['content']
+                                # Remove the first line (title) as we've already added it
+                                page_content_lines = page_content.split('\n')
+                                if page_content_lines and page_content_lines[0].startswith('# '):
+                                    page_content = '\n'.join(page_content_lines[1:])
+                                combined_content += page_content + "\n\n---\n\n"
+                        
+                        # Display combined content
+                        st.markdown("### Combined Results")
+                        st.text_area("Combined LLMStxt Content:", combined_content, height=400)
                         
                         # Provide download link using HTML
-                        page_filename = re.sub(r'[^\w]', '_', result['metadata']['url'])
-                        page_filename = re.sub(r'_+', '_', page_filename)
-                        page_filename = f"{page_filename[:50]}_{datetime.now().strftime('%Y%m%d%H%M%S')}.md"
+                        filename = f"{domain}_combined_{timestamp}.md"
                         
-                        st.markdown(
-                            get_text_download_link(result['content'], page_filename),
-                            unsafe_allow_html=True
-                        )
+                        # Use a workaround for the download button
+                        st.markdown(get_text_download_link(combined_content, filename), unsafe_allow_html=True)
+                    
+                    # Display individual results
+                    st.markdown("### Individual Pages")
+                    for i, result in enumerate(results, 1):
+                        with st.expander(f"Page {i}: {result['metadata']['title']}"):
+                            st.markdown(f"URL: {result['metadata']['url']}")
+                            
+                            # Display either condensed or full content based on user choice
+                            if condensed_output:
+                                condensed_content = format_llmstxt(result['metadata'], result['sections'], condensed=True)
+                                st.text_area(f"Content for {result['metadata']['title']}", condensed_content, height=300)
+                            else:
+                                st.text_area(f"Content for {result['metadata']['title']}", result['content'], height=300)
+                            
+                            # Provide download link using HTML
+                            page_filename = re.sub(r'[^\w]', '_', result['metadata']['url'])
+                            page_filename = re.sub(r'_+', '_', page_filename)
+                            page_filename = f"{page_filename[:50]}_{timestamp}.md"
+                            
+                            if condensed_output:
+                                st.markdown(
+                                    get_text_download_link(condensed_content, page_filename),
+                                    unsafe_allow_html=True
+                                )
+                            else:
+                                st.markdown(
+                                    get_text_download_link(result['content'], page_filename),
+                                    unsafe_allow_html=True
+                                )
             else:
                 st.error("Failed to crawl any pages. Check the URL and try again.")
                 if results and 'error' in results[0]:

@@ -3,7 +3,7 @@ import os
 import logging
 from datetime import datetime
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 import re
 import html2text
 import json
@@ -97,172 +97,193 @@ def check_robots_txt(url):
         # If we can't check robots.txt, proceed anyway
         return True, None
 
-def extract_sections_and_links(soup):
-    """
-    Extract sections and links from the page in a structured way
-    """
-    sections = []
-    current_section = {"title": "Main Content", "links": []}
+def clean_html(soup):
+    """Remove unwanted elements from HTML according to LLMStxt guidelines"""
+    # Remove scripts, styles, and other non-content elements
+    for element in soup(["script", "style", "iframe", "nav", "footer", "aside"]):
+        element.decompose()
     
-    # Find all headings (h1-h6)
-    headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    # Remove comments
+    for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+        comment.extract()
     
-    # If no headings, just process the whole document
+    # Remove elements that are likely navigation or ads
+    for element in soup.find_all(class_=lambda x: x and any(word in str(x).lower() for word in 
+                                                        ["nav", "menu", "ad", "banner", "cookie", 
+                                                         "popup", "sidebar", "footer", "header", 
+                                                         "social", "share"])):
+        element.decompose()
+    
+    # Try to identify and keep the main content area
+    main_content = soup.find(["main", "article", "section", "div"], 
+                             id=lambda x: x and "content" in x.lower(),
+                             class_=lambda x: x and "content" in x.lower())
+    
+    # If we identified a main content area, return just that
+    if main_content:
+        # But ensure it has substantial content
+        if len(main_content.get_text(strip=True)) > 200:
+            return main_content
+    
+    return soup
+
+def extract_main_content(soup):
+    """
+    Extract the main content from the page following LLMStxt format guidelines
+    """
+    # Clean the HTML to focus on main content
+    content_soup = clean_html(soup)
+    
+    # Extract title
+    title = soup.title.string.strip() if soup.title else "Unknown Title"
+    
+    # Extract metadata
+    metadata = {
+        'title': title,
+        'description': '',
+        'date_published': None,
+        'author': None
+    }
+    
+    # Try to get meta description
+    meta_desc = soup.find('meta', attrs={'name': 'description'})
+    if meta_desc:
+        metadata['description'] = meta_desc.get('content', '')
+    
+    # Try to find author info
+    author_meta = soup.find('meta', attrs={'name': 'author'})
+    if author_meta:
+        metadata['author'] = author_meta.get('content', '')
+    
+    # Try to find date published
+    date_meta = soup.find('meta', attrs={'name': ['publishdate', 'date', 'pubdate']})
+    if date_meta:
+        metadata['date_published'] = date_meta.get('content', '')
+    else:
+        # Try to find a time element
+        time_elem = soup.find('time')
+        if time_elem and time_elem.get('datetime'):
+            metadata['date_published'] = time_elem.get('datetime')
+    
+    # Extract content sections
+    content_sections = []
+    
+    # Get all headings in the cleaned content
+    headings = content_soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    
+    # If no headings, try to create a single section from all content
     if not headings:
-        # Find all links in the document
-        for link in soup.find_all('a', href=True):
-            link_text = link.get_text().strip() or "Link"
-            link_url = link.get('href')
-            
-            # Don't include empty or javascript links
-            if not link_url or link_url.startswith('javascript:'):
-                continue
-                
-            # Get optional details from title attribute or surrounding text
-            link_details = link.get('title', '')
-            
-            # If no title attribute, try to get details from parent paragraph
-            if not link_details and link.parent.name == 'p':
-                paragraph_text = link.parent.get_text().strip()
-                link_text_pos = paragraph_text.find(link_text)
-                if link_text_pos >= 0:
-                    context_text = paragraph_text[link_text_pos + len(link_text):].strip()
-                    if context_text:
-                        link_details = context_text[:100] + ('...' if len(context_text) > 100 else '')
-            
-            current_section["links"].append({
-                "title": link_text,
-                "url": link_url,
-                "details": link_details
+        main_content = content_soup.get_text(strip=True)
+        if main_content:
+            content_sections.append({
+                'title': 'Main Content',
+                'level': 2,
+                'content': main_content
             })
-        
-        if current_section["links"]:
-            sections.append(current_section)
-        return sections
-    
-    # Process each heading as a potential section
-    for heading in headings:
-        # Save previous section if it exists
-        if current_section["links"] or len(sections) == 0:
-            sections.append(current_section)
+    else:
+        # Process each heading as a section
+        for i, heading in enumerate(headings):
+            level = int(heading.name[1])
+            title = heading.get_text(strip=True)
             
-        # Start new section
-        current_section = {
-            "title": heading.get_text().strip(),
-            "links": []
-        }
-        
-        # Find all links following this heading until the next heading
-        next_element = heading.find_next()
-        while next_element and next_element.name not in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-            if next_element.name == 'a' and next_element.get('href'):
-                link_text = next_element.get_text().strip() or "Link"
-                link_url = next_element.get('href')
+            # Get the content for this section
+            content = ""
+            current = heading.next_sibling
+            while current and (i == len(headings) - 1 or current != headings[i+1]):
+                if current.name not in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    if current.name == 'p':
+                        content += current.get_text(strip=True) + "\n\n"
+                    elif current.name == 'ul' or current.name == 'ol':
+                        for li in current.find_all('li', recursive=False):
+                            content += "- " + li.get_text(strip=True) + "\n"
+                        content += "\n"
+                    elif current.string and current.string.strip():
+                        content += current.string.strip() + "\n"
+                current = current.next_sibling
                 
-                # Don't include empty or javascript links
-                if not link_url or link_url.startswith('javascript:'):
-                    next_element = next_element.find_next()
-                    continue
+                # Break if we hit another heading
+                if hasattr(current, 'name') and current.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                    break
                 
-                # Get optional details from title attribute or surrounding text
-                link_details = next_element.get('title', '')
-                
-                # If no title attribute, try to get details from parent paragraph
-                if not link_details and next_element.parent.name == 'p':
-                    paragraph_text = next_element.parent.get_text().strip()
-                    link_text_pos = paragraph_text.find(link_text)
-                    if link_text_pos >= 0:
-                        context_text = paragraph_text[link_text_pos + len(link_text):].strip()
-                        if context_text:
-                            link_details = context_text[:100] + ('...' if len(context_text) > 100 else '')
-                
-                current_section["links"].append({
-                    "title": link_text,
-                    "url": link_url,
-                    "details": link_details
+            # Only add non-empty sections
+            if content.strip():
+                content_sections.append({
+                    'title': title,
+                    'level': level,
+                    'content': content.strip()
                 })
             
-            next_element = next_element.find_next()
+    # Extract important links
+    important_links = []
     
-    # Add the last section if it has links
-    if current_section["links"]:
-        sections.append(current_section)
-    
-    # If no sections with links were found, try to find all links in the document
-    if not any(section["links"] for section in sections):
-        general_section = {"title": "General Links", "links": []}
-        for link in soup.find_all('a', href=True):
-            link_text = link.get_text().strip() or "Link"
-            link_url = link.get('href')
-            
-            # Don't include empty or javascript links
-            if not link_url or link_url.startswith('javascript:'):
-                continue
-                
-            # Get optional details from title attribute
-            link_details = link.get('title', '')
-            
-            general_section["links"].append({
-                "title": link_text,
-                "url": link_url,
-                "details": link_details
-            })
+    # Find all links in the main content
+    links = content_soup.find_all('a', href=True)
+    for link in links:
+        # Skip empty links or javascript links
+        href = link.get('href')
+        if not href or href.startswith('javascript:') or href.startswith('#'):
+            continue
         
-        if general_section["links"]:
-            sections.append(general_section)
+        # Get the link text
+        link_text = link.get_text(strip=True)
+        if not link_text:
+            continue
+            
+        # Skip very short or common navigation links
+        if len(link_text) < 3 or link_text.lower() in ['home', 'next', 'prev', 'previous', 'back', 'more']:
+            continue
+            
+        # Make URL absolute
+        absolute_url = urljoin(metadata.get('url', ''), href)
+        
+        # Add to important links
+        important_links.append({
+            'text': link_text,
+            'url': absolute_url
+        })
     
-    return sections
+    return metadata, content_sections, important_links
 
-def format_llmstxt(metadata, sections, condensed=False):
+def format_llmstxt(metadata, content_sections, important_links):
     """
-    Format content according to requested LLMStxt format
+    Format content according to LLMStxt guidelines
     """
-    content = f"# {metadata['title']}\n"
+    # Start with the title as H1
+    output = f"# {metadata['title']}\n\n"
     
-    # Add optional description if available
+    # Add metadata
     if metadata.get('description'):
-        content += f"> {metadata['description']}\n\n"
+        output += f"> {metadata['description']}\n\n"
     
-    # Add each section with its links
-    for section in sections:
-        content += f"## {section['title']}\n"
+    if metadata.get('author'):
+        output += f"Author: {metadata['author']}\n"
         
-        # If condensed, limit the number of links per section
-        links_to_process = section['links']
-        if condensed and len(links_to_process) > 5:
-            links_to_process = links_to_process[:5]
-            
-        for link in links_to_process:
-            # Make sure URL is absolute
-            link_url = link['url']
-            if not link_url.startswith(('http://', 'https://')):
-                link_url = urljoin(metadata['url'], link_url)
-                
-            content += f"- [{link['title']}]({link_url})"
-            
-            # If condensed, truncate details or omit them
-            if link.get('details'):
-                if condensed:
-                    details = link['details'][:50]
-                    if len(link['details']) > 50:
-                        details += "..."
-                    content += f": {details}"
-                else:
-                    content += f": {link['details']}"
-                    
-            content += "\n"
+    if metadata.get('date_published'):
+        output += f"Date: {metadata['date_published']}\n"
         
-        # If condensed and we truncated links, add an ellipsis
-        if condensed and len(section['links']) > 5:
-            content += f"- ... ({len(section['links']) - 5} more links)\n"
-            
-        content += "\n"
+    if metadata.get('url'):
+        output += f"Source: {metadata['url']}\n"
+        
+    output += "\n"
     
-    return content
+    # Add content sections
+    for section in content_sections:
+        # Use the appropriate heading level
+        output += f"{'#' * section['level']} {section['title']}\n\n"
+        output += f"{section['content']}\n\n"
+    
+    # Add important links section if there are any
+    if important_links:
+        output += "## Important Links\n\n"
+        for link in important_links:
+            output += f"- [{link['text']}]({link['url']})\n"
+        output += "\n"
+    
+    return output
 
 def crawl_website(url, format="markdown", respect_robots=True):
     """
-    Crawl a website and extract content according to the custom LLMStxt format.
+    Crawl a website and extract content according to LLMStxt guidelines.
     """
     try:
         # Check robots.txt if requested
@@ -306,31 +327,22 @@ def crawl_website(url, format="markdown", respect_robots=True):
         # Parse HTML
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Extract metadata
-        metadata = {
-            'title': soup.title.string.strip() if soup.title else 'Unknown Title',
-            'url': url,
-            'date_crawled': datetime.now().isoformat(),
-            'source_type': 'web',
-            'description': ''
-        }
+        # Extract the main content according to LLMStxt format
+        metadata, content_sections, important_links = extract_main_content(soup)
         
-        # Try to get meta description
-        meta_desc = soup.find('meta', attrs={'name': 'description'})
-        if meta_desc:
-            metadata['description'] = meta_desc.get('content', '')
+        # Update metadata with URL and timestamp
+        metadata['url'] = url
+        metadata['date_crawled'] = datetime.now().isoformat()
         
-        # Extract sections and links in the requested format
-        sections = extract_sections_and_links(soup)
-        
-        # Format according to the requested LLMStxt structure
-        llms_content = format_llmstxt(metadata, sections)
+        # Format according to LLMStxt guidelines
+        llms_content = format_llmstxt(metadata, content_sections, important_links)
         
         return {
             'success': True,
             'content': llms_content,
             'metadata': metadata,
-            'sections': sections,
+            'content_sections': content_sections,
+            'important_links': important_links
         }
     except requests.exceptions.RequestException as e:
         return {
@@ -357,7 +369,7 @@ def get_csv_download_link(results, filename):
     writer = csv.writer(csv_data)
     
     # Write header
-    writer.writerow(['Page Title', 'URL', 'Section Title', 'Link Title', 'Link URL', 'Link Details'])
+    writer.writerow(['Page Title', 'URL', 'Description', 'Section Title', 'Section Content', 'Link Text', 'Link URL'])
     
     # Write data
     for result in results:
@@ -366,17 +378,43 @@ def get_csv_download_link(results, filename):
             
         page_title = result['metadata']['title']
         page_url = result['metadata']['url']
+        description = result['metadata'].get('description', '')
         
-        for section in result['sections']:
+        # Write sections
+        for section in result['content_sections']:
             section_title = section['title']
-            for link in section['links']:
-                link_title = link['title']
-                link_url = link['url']
-                if not link_url.startswith(('http://', 'https://')):
-                    link_url = urljoin(page_url, link_url)
-                link_details = link.get('details', '')
-                
-                writer.writerow([page_title, page_url, section_title, link_title, link_url, link_details])
+            section_content = section['content'][:500]  # Truncate long content for CSV
+            writer.writerow([page_title, page_url, description, section_title, section_content, '', ''])
+        
+        # Write important links
+        for link in result['important_links']:
+            link_text = link['text']
+            link_url = link['url']
+            writer.writerow([page_title, page_url, description, 'Important Links', '', link_text, link_url])
+    
+    csv_string = csv_data.getvalue()
+    b64 = base64.b64encode(csv_string.encode()).decode()
+    return f'<a href="data:text/csv;base64,{b64}" download="{filename}">Download {filename}</a>'
+
+# Function to create a download link for CSV with Markdown content
+def get_markdown_csv_download_link(results, filename):
+    """Generates a link to download the markdown content as CSV."""
+    csv_data = io.StringIO()
+    writer = csv.writer(csv_data)
+    
+    # Write header
+    writer.writerow(['Page Title', 'URL', 'Complete Markdown Content'])
+    
+    # Write data
+    for result in results:
+        if not result['success']:
+            continue
+            
+        page_title = result['metadata']['title']
+        page_url = result['metadata']['url']
+        markdown_content = result['content']
+        
+        writer.writerow([page_title, page_url, markdown_content])
     
     csv_string = csv_data.getvalue()
     b64 = base64.b64encode(csv_string.encode()).decode()
@@ -384,35 +422,27 @@ def get_csv_download_link(results, filename):
 
 # Main app
 def main():
-    st.set_page_config(page_title="Custom LLMStxt Generator", page_icon="📄", layout="wide")
+    st.set_page_config(page_title="LLMStxt Generator", page_icon="📄", layout="wide")
     
-    st.title("Custom LLMStxt Generator")
-    st.markdown("Extract structured content from websites in a format optimized for LLMs")
+    st.title("LLMStxt Generator")
+    st.markdown("Extract content from websites in the LLMStxt format optimized for language models")
     
     # Add format explanation
-    with st.expander("Format Explanation"):
+    with st.expander("About LLMStxt Format"):
         st.markdown("""
-        ## Custom LLMStxt Format
+        ## LLMStxt Format
         
-        This tool generates content in the following format:
+        This tool generates content following the [LLMStxt guidelines](https://llmstxt.org/), which is a format designed to make web content more digestible for language models.
         
-        ```
-        # Title
-        > Optional description goes here
-        Optional details go here
+        Key features of the LLMStxt format:
         
-        ## Section name
-        - [Link title](https://link_url): Optional link details
+        1. **Clean, structured content** - Removes navigation, ads, and other non-essential elements
+        2. **Hierarchical structure** - Preserves heading levels and document organization
+        3. **Metadata preservation** - Maintains title, description, author, and date information
+        4. **Important links** - Collects and presents relevant links from the page
+        5. **Plain text focus** - Eliminates complex formatting while keeping essential structure
         
-        ## Optional Section
-        - [Link title](https://link_url): Optional link details
-        ```
-        
-        This format:
-        1. Clearly identifies the page title
-        2. Provides context through the optional description
-        3. Organizes content into logical sections
-        4. Preserves important links with their context
+        The tool creates a format that makes it easy for language models to understand the content's context and structure.
         """)
     
     # Creating crawler instance
@@ -433,12 +463,12 @@ def main():
         with advanced_options:
             bypass_403 = st.checkbox("Try to bypass 403 errors", value=False)
             combine_results = st.checkbox("Combine all pages into single file", value=True)
-            condensed_output = st.checkbox("Use condensed output format (shorter content)", value=True)
+            extract_images = st.checkbox("Include image descriptions", value=False)
             col1, col2 = st.columns(2)
             with col1:
-                output_format = st.radio("Output format:", ["Markdown (.md)", "CSV (.csv)"])
+                output_format = st.radio("Output format:", ["Markdown (.md)", "CSV (.csv)", "Markdown in CSV (.csv)"])
         
-        submitted = st.form_submit_button("Generate")
+        submitted = st.form_submit_button("Generate LLMStxt")
         
         if submitted:
             if not url:
@@ -466,7 +496,7 @@ def main():
                 domain = urlparse(url).netloc
                 timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
                 
-                # Handle CSV output format
+                # Handle standard CSV output format
                 if output_format == "CSV (.csv)":
                     filename = f"{domain}_{timestamp}.csv"
                     st.markdown("### CSV Export")
@@ -477,7 +507,7 @@ def main():
                     # Show preview of CSV data
                     with st.expander("CSV Preview"):
                         preview_data = []
-                        header = ['Page Title', 'Section Title', 'Link Title', 'Link URL']
+                        header = ['Page Title', 'Section Title', 'Section Content (truncated)']
                         preview_data.append(header)
                         
                         for result in results[:3]:  # Only show first 3 pages in preview
@@ -486,42 +516,68 @@ def main():
                                 
                             page_title = result['metadata']['title']
                             
-                            for section in result['sections'][:2]:  # Only show first 2 sections per page
+                            for section in result['content_sections'][:2]:  # Only show first 2 sections per page
                                 section_title = section['title']
-                                for link in section['links'][:3]:  # Only show first 3 links per section
-                                    link_title = link['title']
-                                    link_url = link['url']
-                                    preview_data.append([page_title, section_title, link_title, link_url])
+                                section_content = section['content'][:100] + "..." if len(section['content']) > 100 else section['content']
+                                preview_data.append([page_title, section_title, section_content])
                         
                         st.table(preview_data)
+                
+                # Handle Markdown in CSV format
+                elif output_format == "Markdown in CSV (.csv)":
+                    filename = f"{domain}_markdown_{timestamp}.csv"
+                    st.markdown("### Markdown in CSV Export")
+                    
+                    # Provide download link for Markdown CSV
+                    st.markdown(get_markdown_csv_download_link(results, filename), unsafe_allow_html=True)
+                    
+                    # Show preview of CSV data
+                    with st.expander("Markdown CSV Preview"):
+                        preview_data = []
+                        header = ['Page Title', 'URL', 'Markdown Content (truncated)']
+                        preview_data.append(header)
+                        
+                        for result in results[:3]:  # Only show first 3 pages in preview
+                            if not result['success']:
+                                continue
+                                
+                            page_title = result['metadata']['title']
+                            page_url = result['metadata']['url']
+                            markdown_content = result['content'][:150] + "..." if len(result['content']) > 150 else result['content']
+                            
+                            preview_data.append([page_title, page_url, markdown_content])
+                        
+                        st.table(preview_data)
+                        
+                        st.info("The complete markdown content for each page is included in the CSV file. This format is useful for importing into LLM tools that work with structured data.")
                 
                 # Handle Markdown output format
                 else:
                     # Combine results if requested
                     if combine_results and len(results) > 1:
                         combined_content = f"# Website: {urlparse(url).netloc}\n\n"
+                        combined_content += f"Date Processed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        combined_content += f"Total Pages: {len(results)}\n\n"
+                        combined_content += "---\n\n"
+                        
                         for i, result in enumerate(results, 1):
+                            if not result['success']:
+                                continue
+                                
                             combined_content += f"# Page {i}: {result['metadata']['title']}\n"
-                            # Add URL as subtitle
                             combined_content += f"> URL: {result['metadata']['url']}\n\n"
                             
-                            # Generate condensed content for this page if requested
-                            if condensed_output:
-                                # Generate condensed content for this page
-                                condensed_content = format_llmstxt(result['metadata'], result['sections'], condensed=True)
-                                # Remove the first line (title) as we've already added it
-                                condensed_content_lines = condensed_content.split('\n')
-                                if condensed_content_lines and condensed_content_lines[0].startswith('# '):
-                                    condensed_content = '\n'.join(condensed_content_lines[1:])
-                                combined_content += condensed_content + "\n\n---\n\n"
+                            if result['metadata'].get('description'):
+                                combined_content += f"{result['metadata']['description']}\n\n"
+                            
+                            # Add page content (skip the title which we already added)
+                            content_lines = result['content'].split('\n')
+                            if content_lines and content_lines[0].startswith('# '):
+                                content_to_add = '\n'.join(content_lines[1:])
                             else:
-                                # Add the content without the title (which we just added)
-                                page_content = result['content']
-                                # Remove the first line (title) as we've already added it
-                                page_content_lines = page_content.split('\n')
-                                if page_content_lines and page_content_lines[0].startswith('# '):
-                                    page_content = '\n'.join(page_content_lines[1:])
-                                combined_content += page_content + "\n\n---\n\n"
+                                content_to_add = result['content']
+                                
+                            combined_content += content_to_add + "\n\n---\n\n"
                         
                         # Display combined content
                         st.markdown("### Combined Results")
@@ -532,35 +588,61 @@ def main():
                         
                         # Use a workaround for the download button
                         st.markdown(get_text_download_link(combined_content, filename), unsafe_allow_html=True)
+                        
+                        # Also offer CSV with markdown option
+                        st.markdown("### Alternative Download Options")
+                        st.markdown("You can also download the combined markdown content as a CSV file:")
+                        
+                        # Create a special results object for the combined content
+                        combined_results = [{
+                            'success': True,
+                            'metadata': {
+                                'title': f"Combined pages from {domain}",
+                                'url': url
+                            },
+                            'content': combined_content
+                        }]
+                        
+                        csv_filename = f"{domain}_combined_{timestamp}.csv"
+                        st.markdown(get_markdown_csv_download_link(combined_results, csv_filename), unsafe_allow_html=True)
                     
                     # Display individual results
                     st.markdown("### Individual Pages")
                     for i, result in enumerate(results, 1):
+                        if not result['success']:
+                            continue
+                            
                         with st.expander(f"Page {i}: {result['metadata']['title']}"):
                             st.markdown(f"URL: {result['metadata']['url']}")
+                            st.text_area(f"LLMStxt Content", result['content'], height=300)
                             
-                            # Display either condensed or full content based on user choice
-                            if condensed_output:
-                                condensed_content = format_llmstxt(result['metadata'], result['sections'], condensed=True)
-                                st.text_area(f"Content for {result['metadata']['title']}", condensed_content, height=300)
-                            else:
-                                st.text_area(f"Content for {result['metadata']['title']}", result['content'], height=300)
+                            # Provide download options
+                            st.markdown("#### Download Options")
                             
-                            # Provide download link using HTML
+                            # Markdown download
                             page_filename = re.sub(r'[^\w]', '_', result['metadata']['url'])
                             page_filename = re.sub(r'_+', '_', page_filename)
                             page_filename = f"{page_filename[:50]}_{timestamp}.md"
                             
-                            if condensed_output:
-                                st.markdown(
-                                    get_text_download_link(condensed_content, page_filename),
-                                    unsafe_allow_html=True
-                                )
-                            else:
-                                st.markdown(
-                                    get_text_download_link(result['content'], page_filename),
-                                    unsafe_allow_html=True
-                                )
+                            st.markdown(
+                                get_text_download_link(result['content'], page_filename),
+                                unsafe_allow_html=True
+                            )
+                            
+                            # CSV with markdown download
+                            csv_filename = f"{page_filename[:-3]}.csv"
+                            
+                            # Create a single-page result for CSV
+                            single_result = [{
+                                'success': True,
+                                'metadata': result['metadata'],
+                                'content': result['content']
+                            }]
+                            
+                            st.markdown(
+                                get_markdown_csv_download_link(single_result, csv_filename),
+                                unsafe_allow_html=True
+                            )
             else:
                 st.error("Failed to crawl any pages. Check the URL and try again.")
                 if results and 'error' in results[0]:
@@ -568,17 +650,44 @@ def main():
                     st.warning("If you're getting a 403 Forbidden error, try enabling 'Try to bypass 403 errors' in Advanced Options.")
     
     # Add best practices section
-    with st.expander("Best Practices"):
+    with st.expander("LLMStxt Best Practices"):
         st.markdown("""
-        ### Best Practices for Web Crawling
+        ### Best Practices for LLMStxt
         
-        1. **Respect website terms of service** - Some websites explicitly forbid crawling
-        2. **Use reasonable crawl rates** - Be gentle on servers by limiting requests
-        3. **Check robots.txt** - Honor the website's crawling preferences
-        4. **Focus on relevant content** - Avoid crawling login pages, privacy policies, etc.
-        5. **Be careful with depth** - Higher depth values can lead to crawling many irrelevant pages
+        1. **Focus on content, not form** - The LLMStxt format prioritizes the actual content rather than visual styling
+        2. **Maintain structural hierarchy** - Preserve headings and document structure to help LLMs understand the content organization
+        3. **Include metadata** - Title, author, date, and source URL provide important context
+        4. **Clean unwanted elements** - Remove navigation menus, ads, footers, and other non-essential page elements
+        5. **Simplify to plain text** - Eliminate complex HTML in favor of simple text with minimal formatting
+        6. **Preserve semantic meaning** - Keep lists as lists, paragraphs as paragraphs
         
-        This tool implements these best practices by default, but you can adjust settings in Advanced Options.
+        This tool follows these guidelines to create LLM-friendly content extractions.
+        """)
+        
+    # Add usage tips section
+    with st.expander("Usage Tips for Different Export Formats"):
+        st.markdown("""
+        ### When to Use Each Export Format
+        
+        This tool offers three different export formats to suit various needs:
+        
+        1. **Markdown (.md)**
+           - Best for reading the content directly
+           - Ideal for importing into note-taking apps
+           - Good for sharing with humans
+           
+        2. **CSV (.csv)**
+           - Best for structured data analysis
+           - Separates content into discrete fields (title, URL, sections, etc.)
+           - Useful for filtering and sorting content
+           
+        3. **Markdown in CSV (.csv)**
+           - Best for LLM processing pipelines
+           - Keeps the full markdown content intact but in a structured CSV format
+           - Ideal for batch processing with LLMs
+           - Useful for creating training datasets
+        
+        Choose the format that best suits your workflow and how you plan to use the extracted content.
         """)
 
 if __name__ == "__main__":

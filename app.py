@@ -18,6 +18,92 @@ from urllib.parse import urljoin, urlparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Define schema structure for pharmaceutical products
+PHARMA_SCHEMA = {
+    "brandName": None,
+    "genericName": None,
+    "manufacturer": "Genentech",
+    "approvedIndications": [],
+    "drugClass": None,
+    "dosageForm": [],
+    "administration": None,
+    "prescribingInfo": None,
+    "patientResources": [],
+    "sideEffects": [],
+    "warnings": [],
+    "interactions": [],
+    "mechanismOfAction": None,
+    "clinicalTrials": [],
+    "approvalDate": None,
+    "packageInsertURL": None,
+}
+
+# Map of known Genentech products
+GENENTECH_PRODUCTS = {
+    "Oncology": [
+        {"brandName": "Avastin", "genericName": "bevacizumab"},
+        {"brandName": "Herceptin", "genericName": "trastuzumab"},
+        {"brandName": "Rituxan", "genericName": "rituximab"},
+        {"brandName": "Perjeta", "genericName": "pertuzumab"},
+        {"brandName": "Kadcyla", "genericName": "ado-trastuzumab emtansine"},
+        {"brandName": "Gazyva", "genericName": "obinutuzumab"},
+        {"brandName": "Tarceva", "genericName": "erlotinib"},
+        {"brandName": "Polivy", "genericName": "polatuzumab vedotin-piiq"},
+        {"brandName": "Tecentriq", "genericName": "atezolizumab"},
+        {"brandName": "Cotellic", "genericName": "cobimetinib"},
+        {"brandName": "Alecensa", "genericName": "alectinib"},
+        {"brandName": "Zelboraf", "genericName": "vemurafenib"},
+        {"brandName": "Venclexta", "genericName": "venetoclax"},
+        {"brandName": "Erivedge", "genericName": "vismodegib"},
+        {"brandName": "Xeloda", "genericName": "capecitabine"}
+    ],
+    "Neuroscience": [
+        {"brandName": "Ocrevus", "genericName": "ocrelizumab"}
+    ],
+    "Ophthalmology": [
+        {"brandName": "Lucentis", "genericName": "ranibizumab"}
+    ],
+    "Immunology and Respiratory": [
+        {"brandName": "Actemra", "genericName": "tocilizumab"},
+        {"brandName": "Xolair", "genericName": "omalizumab"},
+        {"brandName": "Esbriet", "genericName": "pirfenidone"},
+        {"brandName": "Pulmozyme", "genericName": "dornase alfa"}
+    ],
+    "Hematology": [
+        {"brandName": "Hemlibra", "genericName": "emicizumab"},
+        {"brandName": "Activase", "genericName": "alteplase"},
+        {"brandName": "Cathflo Activase", "genericName": "alteplase"},
+        {"brandName": "TNKase", "genericName": "tenecteplase"}
+    ],
+    "Infectious Disease": [
+        {"brandName": "Xofluza", "genericName": "baloxavir marboxil"},
+        {"brandName": "Tamiflu", "genericName": "oseltamivir"},
+        {"brandName": "Valcyte", "genericName": "valganciclovir"},
+        {"brandName": "Cytovene", "genericName": "ganciclovir"},
+        {"brandName": "Fuzeon", "genericName": "enfuvirtide"},
+        {"brandName": "Invirase", "genericName": "saquinavir"},
+        {"brandName": "Rocephin", "genericName": "ceftriaxone"}
+    ],
+    "Metabolic and Endocrinology": [
+        {"brandName": "Nutropin", "genericName": "somatropin"},
+        {"brandName": "Boniva", "genericName": "ibandronate"},
+        {"brandName": "Xenical", "genericName": "orlistat"}
+    ],
+    "Other Medicines": [
+        {"brandName": "CellCept", "genericName": "mycophenolate mofetil"},
+        {"brandName": "Pegasys", "genericName": "peginterferon alfa-2a"},
+        {"brandName": "Anaprox", "genericName": "naproxen sodium"},
+        {"brandName": "EC-Naprosyn", "genericName": "naproxen"},
+        {"brandName": "Naprosyn", "genericName": "naproxen"},
+        {"brandName": "Klonopin", "genericName": "clonazepam"},
+        {"brandName": "Kytril", "genericName": "granisetron"},
+        {"brandName": "Roferon-A", "genericName": "interferon alfa-2a"},
+        {"brandName": "Romazicon", "genericName": "flumazenil"},
+        {"brandName": "Valium", "genericName": "diazepam"},
+        {"brandName": "Zenapax", "genericName": "daclizumab"}
+    ]
+}
+
 class WebCrawler:
     def __init__(self):
         # More realistic browser user agents
@@ -29,22 +115,45 @@ class WebCrawler:
         ]
         self.visited_urls = set()
         
-    def crawl(self, url, depth=1, format="markdown", max_pages=10):
+    def crawl(self, url, depth=1, max_pages=10, schema_type="pharma"):
         """
-        Crawl a website up to a specified depth and number of pages
+        Crawl a website up to a specified depth and number of pages,
+        extracting schema information
         """
         results = []
         self.visited_urls = set()
+        
+        # First get the base schema
+        base_schema = None
+        if schema_type == "pharma":
+            base_schema = self._extract_base_schema_from_url(url)
         
         def _crawl_recursive(current_url, current_depth):
             if current_depth > depth or len(self.visited_urls) >= max_pages or current_url in self.visited_urls:
                 return
             
             self.visited_urls.add(current_url)
-            result = crawl_website(current_url, format=format)
             
-            if result['success']:
-                results.append(result)
+            # Extract content and schema
+            content_result = crawl_website(current_url)
+            schema_result = None
+            
+            if content_result['success']:
+                # Extract schema from this page
+                if schema_type == "pharma":
+                    schema_result = self._extract_pharma_schema(
+                        current_url, 
+                        content_result, 
+                        base_schema
+                    )
+                
+                # Add results
+                if schema_result:
+                    results.append({
+                        'url': current_url,
+                        'content': content_result,
+                        'schema': schema_result
+                    })
                 
                 # Find more links to crawl if we haven't reached our depth or page limit
                 if current_depth < depth and len(self.visited_urls) < max_pages:
@@ -62,12 +171,194 @@ class WebCrawler:
                             
                             # Only follow links on the same domain
                             if urlparse(absolute_url).netloc == domain and absolute_url not in self.visited_urls:
-                                _crawl_recursive(absolute_url, current_depth + 1)
+                                # Prioritize important pages
+                                priority_keywords = [
+                                    'prescribing', 'information', 'patient', 'safety',
+                                    'indication', 'dosage', 'administration', 'clinical',
+                                    'trials', 'efficacy', 'side-effects', 'faq', 'about', 
+                                    'isi', 'pi', 'medication-guide'
+                                ]
+                                
+                                is_priority = any(keyword in absolute_url.lower() for keyword in priority_keywords)
+                                
+                                if is_priority:
+                                    # Crawl priority pages first
+                                    _crawl_recursive(absolute_url, current_depth + 1)
+                                elif len(self.visited_urls) < max_pages:
+                                    # Then crawl other pages
+                                    _crawl_recursive(absolute_url, current_depth + 1)
                     except Exception as e:
                         logger.error(f"Error finding links on {current_url}: {str(e)}")
                             
         _crawl_recursive(url, 1)
-        return results
+        
+        # Combine all schema results into a single comprehensive schema
+        if results:
+            combined_schema = self._combine_pharma_schemas([r['schema'] for r in results])
+            return {
+                'combined_schema': combined_schema,
+                'page_results': results
+            }
+        return None
+    
+    def _extract_base_schema_from_url(self, url):
+        """Extract initial schema information from URL and known product database"""
+        schema = PHARMA_SCHEMA.copy()
+        
+        # Try to identify the product from the URL
+        for category, products in GENENTECH_PRODUCTS.items():
+            for product in products:
+                brand_name = product['brandName'].lower()
+                if brand_name in url.lower():
+                    schema['brandName'] = product['brandName']
+                    schema['genericName'] = product['genericName']
+                    schema['drugClass'] = category
+                    break
+        
+        return schema
+    
+    def _extract_pharma_schema(self, url, content_result, base_schema):
+        """Extract pharmaceutical schema information from page content"""
+        schema = base_schema.copy() if base_schema else PHARMA_SCHEMA.copy()
+        
+        # Extract information from metadata and content sections
+        metadata = content_result.get('metadata', {})
+        content_sections = content_result.get('content_sections', [])
+        
+        # Extract from title and description
+        title = metadata.get('title', '')
+        description = metadata.get('description', '')
+        
+        # If brand name not already set, try to extract it from title
+        if not schema['brandName']:
+            # Look for product name in title (assumed to be in format "Product Name - Description")
+            if ' - ' in title:
+                possible_brand = title.split(' - ')[0].strip()
+                # Verify it's in our product list
+                for category, products in GENENTECH_PRODUCTS.items():
+                    for product in products:
+                        if product['brandName'].lower() == possible_brand.lower():
+                            schema['brandName'] = product['brandName']
+                            schema['genericName'] = product['genericName']
+                            schema['drugClass'] = category
+                            break
+        
+        # Check for prescribing information URL
+        important_links = content_result.get('important_links', [])
+        for link in important_links:
+            link_text = link.get('text', '').lower()
+            link_url = link.get('url', '')
+            
+            if any(term in link_text for term in ['prescribing information', 'pi', 'package insert']):
+                schema['packageInsertURL'] = link_url
+        
+        # Extract information from content sections
+        for section in content_sections:
+            section_title = section.get('title', '').lower()
+            section_content = section.get('content', '')
+            
+            # Indications
+            if any(term in section_title for term in ['indication', 'use', 'treat']):
+                indications = self._extract_list_items(section_content)
+                if indications:
+                    schema['approvedIndications'].extend(indications)
+            
+            # Side effects
+            if any(term in section_title for term in ['side effect', 'adverse', 'safety']):
+                side_effects = self._extract_list_items(section_content)
+                if side_effects:
+                    schema['sideEffects'].extend(side_effects)
+            
+            # Warnings
+            if any(term in section_title for term in ['warning', 'precaution', 'serious']):
+                warnings = self._extract_list_items(section_content)
+                if warnings:
+                    schema['warnings'].extend(warnings)
+            
+            # Dosage
+            if any(term in section_title for term in ['dosage', 'dose', 'administration']):
+                if not schema['administration']:
+                    schema['administration'] = section_content.strip()
+                
+                # Extract dosage forms
+                dosage_forms = re.findall(r'(?:available|supplied)(?:\s+as)?(?:\s+an?)?\s+([^.]+(?:tablet|capsule|injection|solution|suspension|vial|infusion)[^.]*)', 
+                                         section_content.lower())
+                if dosage_forms:
+                    schema['dosageForm'].extend([form.strip() for form in dosage_forms])
+            
+            # Mechanism of action
+            if any(term in section_title for term in ['mechanism', 'how it works', 'action']):
+                schema['mechanismOfAction'] = section_content.strip()
+            
+            # Clinical trials
+            if any(term in section_title for term in ['clinical', 'trial', 'study', 'evidence']):
+                trials = self._extract_list_items(section_content)
+                if trials:
+                    schema['clinicalTrials'].extend(trials)
+            
+            # Patient resources
+            if any(term in section_title for term in ['patient', 'resource', 'support', 'assistance']):
+                resources = self._extract_list_items(section_content)
+                if resources:
+                    schema['patientResources'].extend(resources)
+        
+        # Remove duplicates from lists
+        for field in ['approvedIndications', 'sideEffects', 'warnings', 'clinicalTrials', 'patientResources', 'dosageForm']:
+            if schema[field]:
+                schema[field] = list(set(schema[field]))
+        
+        return schema
+    
+    def _extract_list_items(self, text):
+        """Extract list items from text content"""
+        # Look for bullet points or numbered lists
+        bullet_items = re.findall(r'•\s*([^•\n]+)', text)
+        if bullet_items:
+            return [item.strip() for item in bullet_items if len(item.strip()) > 5]
+        
+        # Look for numbered lists
+        numbered_items = re.findall(r'\d+\.\s*([^\d\n]+)', text)
+        if numbered_items:
+            return [item.strip() for item in numbered_items if len(item.strip()) > 5]
+            
+        # If no structured list is found, try splitting by sentences or line breaks
+        if len(text) > 50:
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            if sentences and len(sentences) > 1:
+                return [s.strip() for s in sentences if len(s.strip()) > 15]
+        
+        # Return the whole text as a single item if it's not too long
+        if text and len(text.strip()) > 10:
+            return [text.strip()]
+            
+        return []
+    
+    def _combine_pharma_schemas(self, schemas):
+        """Combine multiple schema results into one comprehensive schema"""
+        if not schemas:
+            return None
+            
+        combined = schemas[0].copy()
+        
+        # For subsequent schemas, merge their information
+        for schema in schemas[1:]:
+            # Merge list fields
+            for field in ['approvedIndications', 'sideEffects', 'warnings', 'clinicalTrials', 'patientResources', 'dosageForm']:
+                if schema[field]:
+                    combined[field].extend(schema[field])
+                    # Remove duplicates
+                    combined[field] = list(set(combined[field]))
+            
+            # For text fields, use the most detailed information
+            for field in ['mechanismOfAction', 'administration']:
+                if schema[field] and (not combined[field] or len(schema[field]) > len(combined[field])):
+                    combined[field] = schema[field]
+            
+            # For URL fields, use if not already set
+            if schema['packageInsertURL'] and not combined['packageInsertURL']:
+                combined['packageInsertURL'] = schema['packageInsertURL']
+        
+        return combined
 
 def check_robots_txt(url):
     """Check if robots.txt allows crawling"""
@@ -356,11 +647,12 @@ def crawl_website(url, format="markdown", respect_robots=True):
             'error': f"Error: {str(e)}"
         }
 
-# Function to create a download link for text content
-def get_text_download_link(text, filename):
-    """Generates a link to download the given text."""
-    b64 = base64.b64encode(text.encode()).decode()
-    return f'<a href="data:text/plain;base64,{b64}" download="{filename}">Download {filename}</a>'
+# Function to create a download link for JSON content
+def get_json_download_link(data, filename):
+    """Generates a link to download the given data as JSON."""
+    json_str = json.dumps(data, indent=2)
+    b64 = base64.b64encode(json_str.encode()).decode()
+    return f'<a href="data:application/json;base64,{b64}" download="{filename}">Download {filename}</a>'
 
 # Function to create a download link for CSV content
 def get_csv_download_link(results, filename):
@@ -369,326 +661,38 @@ def get_csv_download_link(results, filename):
     writer = csv.writer(csv_data)
     
     # Write header
-    writer.writerow(['Page Title', 'URL', 'Description', 'Section Title', 'Section Content', 'Link Text', 'Link URL'])
+    writer.writerow(['Brand Name', 'Generic Name', 'Drug Class', 'Indications', 'Side Effects', 'Dosage Forms', 'Administration', 'Warnings', 'Mechanism of Action', 'Clinical Trials', 'Package Insert URL'])
     
     # Write data
     for result in results:
         if not result['success']:
             continue
             
-        page_title = result['metadata']['title']
-        page_url = result['metadata']['url']
-        description = result['metadata'].get('description', '')
-        
-        # Write sections
-        for section in result['content_sections']:
-            section_title = section['title']
-            section_content = section['content'][:500]  # Truncate long content for CSV
-            writer.writerow([page_title, page_url, description, section_title, section_content, '', ''])
-        
-        # Write important links
-        for link in result['important_links']:
-            link_text = link['text']
-            link_url = link['url']
-            writer.writerow([page_title, page_url, description, 'Important Links', '', link_text, link_url])
-    
-    csv_string = csv_data.getvalue()
-    b64 = base64.b64encode(csv_string.encode()).decode()
-    return f'<a href="data:text/csv;base64,{b64}" download="{filename}">Download {filename}</a>'
-
-# Function to create a download link for CSV with Markdown content
-def get_markdown_csv_download_link(results, filename):
-    """Generates a link to download the markdown content as CSV."""
-    csv_data = io.StringIO()
-    writer = csv.writer(csv_data)
-    
-    # Write header
-    writer.writerow(['Page Title', 'URL', 'Complete Markdown Content'])
-    
-    # Write data
-    for result in results:
-        if not result['success']:
+        schema = result.get('schema', {})
+        if not schema:
             continue
             
-        page_title = result['metadata']['title']
-        page_url = result['metadata']['url']
-        markdown_content = result['content']
-        
-        writer.writerow([page_title, page_url, markdown_content])
+        writer.writerow([
+            schema.get('brandName', ''),
+            schema.get('genericName', ''),
+            schema.get('drugClass', ''),
+            '; '.join(schema.get('approvedIndications', [])),
+            '; '.join(schema.get('sideEffects', [])),
+            '; '.join(schema.get('dosageForm', [])),
+            schema.get('administration', ''),
+            '; '.join(schema.get('warnings', [])),
+            schema.get('mechanismOfAction', ''),
+            '; '.join(schema.get('clinicalTrials', [])),
+            schema.get('packageInsertURL', '')
+        ])
     
     csv_string = csv_data.getvalue()
     b64 = base64.b64encode(csv_string.encode()).decode()
     return f'<a href="data:text/csv;base64,{b64}" download="{filename}">Download {filename}</a>'
 
-# Main app
-def main():
-    st.set_page_config(page_title="LLMStxt Generator", page_icon="📄", layout="wide")
+# Function to get a suggested product URL based on product name
+def get_suggested_url(product_name):
+    """Get a suggested URL for a given product name"""
+    product_name_lower = product_name.lower()
     
-    st.title("LLMStxt Generator")
-    st.markdown("Extract content from websites in the LLMStxt format optimized for language models")
-    
-    # Add format explanation
-    with st.expander("About LLMStxt Format"):
-        st.markdown("""
-        ## LLMStxt Format
-        
-        This tool generates content following the [LLMStxt guidelines](https://llmstxt.org/), which is a format designed to make web content more digestible for language models.
-        
-        Key features of the LLMStxt format:
-        
-        1. **Clean, structured content** - Removes navigation, ads, and other non-essential elements
-        2. **Hierarchical structure** - Preserves heading levels and document organization
-        3. **Metadata preservation** - Maintains title, description, author, and date information
-        4. **Important links** - Collects and presents relevant links from the page
-        5. **Plain text focus** - Eliminates complex formatting while keeping essential structure
-        
-        The tool creates a format that makes it easy for language models to understand the content's context and structure.
-        """)
-    
-    # Creating crawler instance
-    crawler = WebCrawler()
-    
-    # Form for URL input
-    with st.form("url_form"):
-        url = st.text_input("Enter website URL:")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            depth = st.number_input("Crawl depth:", min_value=1, max_value=3, value=1)
-        with col2:
-            max_pages = st.number_input("Maximum pages to crawl:", min_value=1, max_value=50, value=10)
-        with col3:
-            respect_robots = st.checkbox("Respect robots.txt", value=True)
-        
-        advanced_options = st.expander("Advanced Options")
-        with advanced_options:
-            bypass_403 = st.checkbox("Try to bypass 403 errors", value=False)
-            combine_results = st.checkbox("Combine all pages into single file", value=True)
-            extract_images = st.checkbox("Include image descriptions", value=False)
-            col1, col2 = st.columns(2)
-            with col1:
-                output_format = st.radio("Output format:", ["Markdown (.md)", "CSV (.csv)", "Markdown in CSV (.csv)"])
-        
-        submitted = st.form_submit_button("Generate LLMStxt")
-        
-        if submitted:
-            if not url:
-                st.error("URL is required!")
-                return
-                
-            # Add http:// if missing
-            if not url.startswith(('http://', 'https://')):
-                url = 'https://' + url
-                st.info(f"Added https:// to URL: {url}")
-            
-            with st.spinner(f"Crawling website (up to {max_pages} pages)..."):
-                if depth > 1:
-                    # Multi-page crawl
-                    results = crawler.crawl(url, depth=depth, max_pages=max_pages)
-                else:
-                    # Single page crawl
-                    result = crawl_website(url)
-                    results = [result] if result['success'] else []
-            
-            if results:
-                # Display results
-                st.success(f"Successfully crawled {len(results)} pages")
-                
-                domain = urlparse(url).netloc
-                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                
-                # Handle standard CSV output format
-                if output_format == "CSV (.csv)":
-                    filename = f"{domain}_{timestamp}.csv"
-                    st.markdown("### CSV Export")
-                    
-                    # Provide download link for CSV
-                    st.markdown(get_csv_download_link(results, filename), unsafe_allow_html=True)
-                    
-                    # Show preview of CSV data
-                    with st.expander("CSV Preview"):
-                        preview_data = []
-                        header = ['Page Title', 'Section Title', 'Section Content (truncated)']
-                        preview_data.append(header)
-                        
-                        for result in results[:3]:  # Only show first 3 pages in preview
-                            if not result['success']:
-                                continue
-                                
-                            page_title = result['metadata']['title']
-                            
-                            for section in result['content_sections'][:2]:  # Only show first 2 sections per page
-                                section_title = section['title']
-                                section_content = section['content'][:100] + "..." if len(section['content']) > 100 else section['content']
-                                preview_data.append([page_title, section_title, section_content])
-                        
-                        st.table(preview_data)
-                
-                # Handle Markdown in CSV format
-                elif output_format == "Markdown in CSV (.csv)":
-                    filename = f"{domain}_markdown_{timestamp}.csv"
-                    st.markdown("### Markdown in CSV Export")
-                    
-                    # Provide download link for Markdown CSV
-                    st.markdown(get_markdown_csv_download_link(results, filename), unsafe_allow_html=True)
-                    
-                    # Show preview of CSV data
-                    with st.expander("Markdown CSV Preview"):
-                        preview_data = []
-                        header = ['Page Title', 'URL', 'Markdown Content (truncated)']
-                        preview_data.append(header)
-                        
-                        for result in results[:3]:  # Only show first 3 pages in preview
-                            if not result['success']:
-                                continue
-                                
-                            page_title = result['metadata']['title']
-                            page_url = result['metadata']['url']
-                            markdown_content = result['content'][:150] + "..." if len(result['content']) > 150 else result['content']
-                            
-                            preview_data.append([page_title, page_url, markdown_content])
-                        
-                        st.table(preview_data)
-                        
-                        st.info("The complete markdown content for each page is included in the CSV file. This format is useful for importing into LLM tools that work with structured data.")
-                
-                # Handle Markdown output format
-                else:
-                    # Combine results if requested
-                    if combine_results and len(results) > 1:
-                        combined_content = f"# Website: {urlparse(url).netloc}\n\n"
-                        combined_content += f"Date Processed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                        combined_content += f"Total Pages: {len(results)}\n\n"
-                        combined_content += "---\n\n"
-                        
-                        for i, result in enumerate(results, 1):
-                            if not result['success']:
-                                continue
-                                
-                            combined_content += f"# Page {i}: {result['metadata']['title']}\n"
-                            combined_content += f"> URL: {result['metadata']['url']}\n\n"
-                            
-                            if result['metadata'].get('description'):
-                                combined_content += f"{result['metadata']['description']}\n\n"
-                            
-                            # Add page content (skip the title which we already added)
-                            content_lines = result['content'].split('\n')
-                            if content_lines and content_lines[0].startswith('# '):
-                                content_to_add = '\n'.join(content_lines[1:])
-                            else:
-                                content_to_add = result['content']
-                                
-                            combined_content += content_to_add + "\n\n---\n\n"
-                        
-                        # Display combined content
-                        st.markdown("### Combined Results")
-                        st.text_area("Combined LLMStxt Content:", combined_content, height=400)
-                        
-                        # Provide download link using HTML
-                        filename = f"{domain}_combined_{timestamp}.md"
-                        
-                        # Use a workaround for the download button
-                        st.markdown(get_text_download_link(combined_content, filename), unsafe_allow_html=True)
-                        
-                        # Also offer CSV with markdown option
-                        st.markdown("### Alternative Download Options")
-                        st.markdown("You can also download the combined markdown content as a CSV file:")
-                        
-                        # Create a special results object for the combined content
-                        combined_results = [{
-                            'success': True,
-                            'metadata': {
-                                'title': f"Combined pages from {domain}",
-                                'url': url
-                            },
-                            'content': combined_content
-                        }]
-                        
-                        csv_filename = f"{domain}_combined_{timestamp}.csv"
-                        st.markdown(get_markdown_csv_download_link(combined_results, csv_filename), unsafe_allow_html=True)
-                    
-                    # Display individual results
-                    st.markdown("### Individual Pages")
-                    for i, result in enumerate(results, 1):
-                        if not result['success']:
-                            continue
-                            
-                        with st.expander(f"Page {i}: {result['metadata']['title']}"):
-                            st.markdown(f"URL: {result['metadata']['url']}")
-                            st.text_area(f"LLMStxt Content", result['content'], height=300)
-                            
-                            # Provide download options
-                            st.markdown("#### Download Options")
-                            
-                            # Markdown download
-                            page_filename = re.sub(r'[^\w]', '_', result['metadata']['url'])
-                            page_filename = re.sub(r'_+', '_', page_filename)
-                            page_filename = f"{page_filename[:50]}_{timestamp}.md"
-                            
-                            st.markdown(
-                                get_text_download_link(result['content'], page_filename),
-                                unsafe_allow_html=True
-                            )
-                            
-                            # CSV with markdown download
-                            csv_filename = f"{page_filename[:-3]}.csv"
-                            
-                            # Create a single-page result for CSV
-                            single_result = [{
-                                'success': True,
-                                'metadata': result['metadata'],
-                                'content': result['content']
-                            }]
-                            
-                            st.markdown(
-                                get_markdown_csv_download_link(single_result, csv_filename),
-                                unsafe_allow_html=True
-                            )
-            else:
-                st.error("Failed to crawl any pages. Check the URL and try again.")
-                if results and 'error' in results[0]:
-                    st.error(f"Error: {results[0]['error']}")
-                    st.warning("If you're getting a 403 Forbidden error, try enabling 'Try to bypass 403 errors' in Advanced Options.")
-    
-    # Add best practices section
-    with st.expander("LLMStxt Best Practices"):
-        st.markdown("""
-        ### Best Practices for LLMStxt
-        
-        1. **Focus on content, not form** - The LLMStxt format prioritizes the actual content rather than visual styling
-        2. **Maintain structural hierarchy** - Preserve headings and document structure to help LLMs understand the content organization
-        3. **Include metadata** - Title, author, date, and source URL provide important context
-        4. **Clean unwanted elements** - Remove navigation menus, ads, footers, and other non-essential page elements
-        5. **Simplify to plain text** - Eliminate complex HTML in favor of simple text with minimal formatting
-        6. **Preserve semantic meaning** - Keep lists as lists, paragraphs as paragraphs
-        
-        This tool follows these guidelines to create LLM-friendly content extractions.
-        """)
-        
-    # Add usage tips section
-    with st.expander("Usage Tips for Different Export Formats"):
-        st.markdown("""
-        ### When to Use Each Export Format
-        
-        This tool offers three different export formats to suit various needs:
-        
-        1. **Markdown (.md)**
-           - Best for reading the content directly
-           - Ideal for importing into note-taking apps
-           - Good for sharing with humans
-           
-        2. **CSV (.csv)**
-           - Best for structured data analysis
-           - Separates content into discrete fields (title, URL, sections, etc.)
-           - Useful for filtering and sorting content
-           
-        3. **Markdown in CSV (.csv)**
-           - Best for LLM processing pipelines
-           - Keeps the full markdown content intact but in a structured CSV format
-           - Ideal for batch processing with LLMs
-           - Useful for creating training datasets
-        
-        Choose the format that best suits your workflow and how you plan to use the extracted content.
-        """)
-
-if __name__ == "__main__":
-    main()
+    # Common
